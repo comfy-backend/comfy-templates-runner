@@ -1,0 +1,4 @@
+{
+  "date": "",
+  "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the weekly workload)"
+}
