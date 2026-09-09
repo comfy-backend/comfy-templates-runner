@@ -121,11 +121,13 @@ jobs:
               echo "data commit pushed (attempt ${attempt})"
               exit 0
             fi
-            echo "push attempt ${attempt} rejected — rebasing on origin/main, retrying"
-            if ! git pull --rebase origin main; then
-              echo "FATAL: rebase onto origin/main failed (conflict with a concurrent push?)"
-              git rebase --abort 2>/dev/null || true
-              exit 1
+            if [ "${attempt}" -lt 3 ]; then
+              echo "push attempt ${attempt} rejected — rebasing on origin/main, retrying"
+              if ! git pull --rebase origin main; then
+                echo "FATAL: rebase onto origin/main failed (conflict with a concurrent push?)"
+                git rebase --abort 2>/dev/null || true
+                exit 1
+              fi
             fi
           done
           echo "FATAL: could not push the data commit after 3 attempts"
@@ -184,7 +186,6 @@ jobs:
                   json.dumps(payload, indent=2).encode()).decode(),
           }).encode()
           if sha:
-              import urllib.parse
               body = json.loads(body.decode())
               body["sha"] = sha
               body = json.dumps(body).encode()
