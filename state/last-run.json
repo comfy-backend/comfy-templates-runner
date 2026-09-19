@@ -1,4 +1,4 @@
 {
-  "date": "2026-09-14",
+  "date": "2026-09-19",
   "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the weekly workload)"
 }
