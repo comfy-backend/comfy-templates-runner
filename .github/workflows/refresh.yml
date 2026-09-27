@@ -10,7 +10,7 @@ name: Weekly Data Refresh
 #
 # Workload: the 8-step upstream data refresh (01-07 + verify, 100%
 # Python stdlib, the path-portable work/comfy-templates/scripts/cron/
-# daily_refresh.sh also used by the sandbox daemon) → 7-check audit →
+# daily_refresh.sh also used by the sandbox daemon) → 10-check audit →
 # race-scoped data commit pushed back to the private repo's main →
 # the connected Vercel project auto-deploys it.
 #
@@ -40,6 +40,17 @@ name: Weekly Data Refresh
 # The sandbox's Thursday-09:00-PT daemon stays as the local fallback
 # (it never commits; git is the disk).
 #
+# ─── Failure alerting (2026-09-27, AR3 D1) ───────────────────
+# The 2026-09-21/22 PAT-death failures sat unnoticed for ~5 days:
+# nothing alerted on a red scheduled run. The alert-failure step below
+# opens (or comments on) ONE open issue labeled `data-refresh-alert`
+# using the runner repo's OWN GITHUB_TOKEN — deliberately NOT GH_PAT,
+# because the alert must fire exactly when GH_PAT is dead (the incident
+# class). `cc @trinitylivy` subscribes the account (notifications fire
+# on mentions even without watching the repo). The next green run
+# auto-closes bot-created alerts. Timeout kills are covered via
+# `failure() || cancelled()`.
+#
 # Secrets: GH_PAT (private checkout + push). This workflow never echoes
 # secret values; GitHub auto-redacts registered ones in public logs.
 # No pull_request triggers — fork PRs can never access secrets.
@@ -54,7 +65,10 @@ concurrency:
   group: weekly-refresh
   cancel-in-progress: false # never kill a refresh mid-scrape
 
-permissions: {} # GH_PAT does everything; the runner repo's own token needs nothing
+# GH_PAT still does every private-repo write; the runner repo's own
+# token gets issues:write ONLY for the alert steps (AR3 D1).
+permissions:
+  issues: write
 
 jobs:
   refresh:
@@ -90,7 +104,7 @@ jobs:
         working-directory: comfy-templates
         run: bash work/comfy-templates/scripts/cron/daily_refresh.sh
 
-      - name: Post-refresh audit (7 structural checks)
+      - name: Post-refresh audit (10 structural checks, A-J)
         working-directory: comfy-templates
         run: python3 scripts/audit_refresh.py
 
@@ -175,8 +189,21 @@ jobs:
               print(f"state/last-run.json already records {today} — skipping.")
               raise SystemExit(0)
 
+          # Enriched payload (AR3 D1): prod-facing built_at + corpus size
+          # so freshness is observable from the state file alone.
+          built_at, corpus_total = "", None
+          try:
+              with open("comfy-templates/public/data/stats.json") as fh:
+                  stats = json.load(fh)
+              built_at = stats.get("built_at", "")
+              corpus_total = stats.get("total_workflows")
+          except Exception:
+              pass  # first run / not built yet — keep the fields empty
+
           payload = {
               "date": today,
+              "built_at": built_at,
+              "corpus_total": corpus_total,
               "purpose": "public observability: last successful data-refresh run "
                          "(keeps GHA schedules alive + shows liveness of the weekly workload)",
           }
@@ -191,4 +218,138 @@ jobs:
               body = json.dumps(body).encode()
           call("PUT", body)
           print(f"state/last-run.json updated to {today}.")
+          PYEOF
+
+      # ─── Failure alerting (AR3 D1) ────────────────────────────────
+      # Runs AFTER every other step so any failure (checkout/PAT death,
+      # pipeline, audit, push exhaustion, timeout-kill) reaches it.
+      - name: Alert on failure (open/comment alert issue)
+        if: failure() || cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_REPO: comfy-backend/comfy-templates-runner
+          ALERT_LABEL: data-refresh-alert
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["RUNNER_REPO"]
+          label = os.environ["ALERT_LABEL"]
+          run_url = os.environ["RUN_URL"]
+          marker = "<!-- bot: data-refresh-alert -->"
+          cc = "cc @trinitylivy"
+
+          def call(method, path, body=None):
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}", method=method, data=body,
+                  headers={"Authorization": f"token {token}",
+                           "User-Agent": "comfy-templates-runner",
+                           "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  raw = resp.read()
+                  return resp.status, (json.loads(raw) if raw else {})
+
+          # The label must exist for label-filtered search to work.
+          try:
+              call("GET", f"/repos/{repo}/labels/{label}")
+          except Exception:
+              call("POST", f"/repos/{repo}/labels", json.dumps({
+                  "name": label, "color": "d73a4a",
+                  "description": "automated data-refresh failure alert",
+              }).encode())
+
+          _, issues = call(
+              "GET", f"/repos/{repo}/issues?labels={label}&state=open")
+          open_alerts = [i for i in issues if marker in (i.get("body") or "")]
+
+          body_text = (
+              f"{marker}\n"
+              f"**Scheduled data refresh FAILED** — production data is now "
+              f"stale until this is fixed.\n\n"
+              f"- Run: {run_url}\n"
+              f"- Event: `{os.environ['EVENT_NAME']}`  |  "
+              f"Job status: `{os.environ['JOB_STATUS']}`  |  "
+              f"Attempt: `{os.environ['RUN_ATTEMPT']}`\n"
+              f"- Time (UTC): {__import__('datetime').datetime.utcnow().isoformat()}\n\n"
+              f"Open the run URL and read the first red step (check the "
+              f"checkout step first — a dead/rotted `GH_PAT` secret fails "
+              f"there, exactly like the 2026-09-21 incident; fix = "
+              f"`set-secret.py` on BOTH runner repos).\n\n{cc}"
+          )
+
+          if not open_alerts:
+              call("POST", f"/repos/{repo}/issues", json.dumps({
+                  "title": "Data refresh FAILED — action required",
+                  "body": body_text,
+                  "labels": [label],
+              }).encode())
+              print("alert issue CREATED")
+          else:
+              # one comment per failed attempt on the single open alert
+              call("POST",
+                   f"/repos/{repo}/issues/{open_alerts[0]['number']}/comments",
+                   json.dumps({"body": body_text}).encode())
+              print(f"alert issue #{open_alerts[0]['number']} COMMENTED")
+          PYEOF
+
+      - name: Resolve alert on success (auto-close bot alerts)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_REPO: comfy-backend/comfy-templates-runner
+          ALERT_LABEL: data-refresh-alert
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["RUNNER_REPO"]
+          label = os.environ["ALERT_LABEL"]
+          run_url = os.environ["RUN_URL"]
+          marker = "<!-- bot: data-refresh-alert -->"
+
+          def call(method, path, body=None):
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}", method=method, data=body,
+                  headers={"Authorization": f"token {token}",
+                           "User-Agent": "comfy-templates-runner",
+                           "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  raw = resp.read()
+                  return resp.status, (json.loads(raw) if raw else {})
+
+          try:
+              _, issues = call(
+                  "GET", f"/repos/{repo}/issues?labels={label}&state=open")
+          except Exception as e:
+              print(f"label search failed (label may not exist yet): {e}")
+              raise SystemExit(0)
+
+          # Close ONLY bot-created alerts (marker in body) — never a
+          # human note that happened to carry the label.
+          closed = 0
+          for issue in issues:
+              if marker not in (issue.get("body") or ""):
+                  continue
+              call("POST",
+                   f"/repos/{repo}/issues/{issue['number']}/comments",
+                   json.dumps({"body": (
+                       f"Recovered: green run {run_url} — alert auto-closed."
+                   )}).encode())
+              call("PATCH", f"/repos/{repo}/issues/{issue['number']}",
+                   json.dumps({"state": "closed"}).encode())
+              closed += 1
+          print(f"resolved {closed} alert issue(s)")
           PYEOF
