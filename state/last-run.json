@@ -1,4 +1,6 @@
 {
-  "date": "2026-09-27",
+  "date": "2026-09-28",
+  "built_at": "2026-09-28T21:30:04.661122+00:00",
+  "corpus_total": 940,
   "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the weekly workload)"
 }
