@@ -11,8 +11,11 @@ name: Weekly Data Refresh
 # Workload: the 8-step upstream data refresh (01-07 + verify, 100%
 # Python stdlib, the path-portable work/comfy-templates/scripts/cron/
 # daily_refresh.sh also used by the sandbox daemon) → 10-check audit →
-# race-scoped data commit pushed back to the private repo's main →
-# the connected Vercel project auto-deploys it.
+# app consumption contract test (vitest, W2-c 2026-09-29) → race-scoped
+# data commit pushed back to the private repo's main → post-push PROD
+# VERIFICATION (the Vercel deploy is polled until the new built_at is
+# live — a silent deploy failure now reds this run the same day, W2-c
+# P2) → the connected Vercel project auto-deploys it.
 #
 # Commit identity: trinitylivy <trinitylivy@gmail.com> — Vercel's git
 # integration has skipped deploys for other authors before (repo
@@ -23,6 +26,8 @@ name: Weekly Data Refresh
 #   * verify.py rc=1 is a soft pass; rc=2 or any step failure withholds
 #     the stamp and the commit step never runs — partial data can never
 #     land on main.
+#   * the consumption contract test runs BEFORE the commit: data that
+#     breaks the app's parsers is withheld, not shipped (W2-b P2-3).
 #   * the commit is scoped strictly to pipeline outputs
 #     (work/comfy-templates/data + public/data) — never `git add -A`.
 #   * push is plain (never force); on a mid-run race it rebases and
@@ -32,11 +37,14 @@ name: Weekly Data Refresh
 # GitHub's scheduler DROPS a large fraction of scheduled runs under
 # platform load (observed 2026-09-06 on the hourly sync-runner: ~2/3).
 # Two mechanisms guarantee weekly coverage:
-#   1. The canonical Monday 16:00 UTC slot (09:00 PDT) — same slot the
-#      in-repo (dormant) weekly-refresh.yml uses.
-#   2. A Tuesday 17:07 UTC backstop (off-peak :07 convention). If the
-#      Monday run landed, Tuesday finds "no data changes" and exits
-#      clean — a cheap self-heal for a dropped Monday.
+#   1. The canonical Monday 16:00 UTC slot (09:00 PDT).
+#   2. A Tuesday 17:07 UTC backstop (off-peak :07 convention).
+# NOTE (W2-c 2026-09-29, corrected): the Tuesday run does NOT "exit
+# clean with no changes" — every build re-stamps stats.json built_at,
+# so each green run commits a small churn commit. That churn is the
+# DESIGNED liveness heartbeat: it proves the pipeline (and the
+# watchdog's built_at freshness signal) is alive even when upstream is
+# static. Do NOT "fix" it by skipping the stamp.
 # The sandbox's Thursday-09:00-PT daemon stays as the local fallback
 # (it never commits; git is the disk).
 #
@@ -49,7 +57,13 @@ name: Weekly Data Refresh
 # class). `cc @trinitylivy` subscribes the account (notifications fire
 # on mentions even without watching the repo). The next green run
 # auto-closes bot-created alerts. Timeout kills are covered via
-# `failure() || cancelled()`.
+# `failure() || cancelled()`. If THIS run is red but no alert issue
+# exists, the alert step itself failed — check its logs (that state
+# has no second alarm; W2-c P3 accepted).
+#
+# On failure the pipeline logs are uploaded as a run artifact (14-day
+# retention) — the ephemeral runner would otherwise lose the only copy
+# of WHY the refresh failed (W2-c P2).
 #
 # Secrets: GH_PAT (private checkout + push). This workflow never echoes
 # secret values; GitHub auto-redacts registered ones in public logs.
@@ -74,7 +88,7 @@ jobs:
   refresh:
     name: Weekly upstream data refresh
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # pipeline ~2-3 min; generous ceiling for retries
+    timeout-minutes: 25 # pipeline ~3m + vitest ~3m + prod-verify up to ~6m
     steps:
       - name: Check configuration
         env:
@@ -107,6 +121,21 @@ jobs:
       - name: Post-refresh audit (10 structural checks, A-J)
         working-directory: comfy-templates
         run: python3 scripts/audit_refresh.py
+
+      # ─── App consumption contract test (W2-b P2-3, 2026-09-29) ──────
+      # Runs BEFORE the commit: a corpus that the app's parsers cannot
+      # consume (shape drift the structural checks don't model, e.g. a
+      # tags:null regression) must be WITHHELD, not shipped. The test
+      # reads the real public/data files and runs them through
+      # filterWorkflows / vramClass / workflowVramLabel.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: App consumption contract test (served corpus vs app parsers)
+        working-directory: comfy-templates
+        run: |
+          bun install --frozen-lockfile --silent
+          bunx vitest run tests/lib/public-data-consumption.test.ts --reporter=dot
 
       - name: Commit and push data changes (race-safe)
         working-directory: comfy-templates
@@ -145,6 +174,32 @@ jobs:
             fi
           done
           echo "FATAL: could not push the data commit after 3 attempts"
+          exit 1
+
+      # ─── Post-push prod verification (W2-c P2-8, 2026-09-29) ────────
+      # A green push does NOT mean prod serves the new data — the Vercel
+      # deploy can fail silently (incl. the commit-author trap). Poll
+      # prod's stats.json until its built_at matches the tree we just
+      # pushed; a mismatch after ~6 minutes reds this run (the alert
+      # step then fires the same day instead of the watchdog's 8-day
+      # worst case).
+      - name: Verify production deployment (post-push)
+        working-directory: comfy-templates
+        run: |
+          set -euo pipefail
+          expected="$(python3 -c "import json; print(json.load(open('public/data/stats.json'))['built_at'])")"
+          echo "expecting prod built_at = ${expected}"
+          for attempt in $(seq 1 30); do
+            got="$(curl -sf --max-time 15 https://comfy-templates.vercel.app/data/stats.json \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('built_at',''))" 2>/dev/null || true)"
+            if [ "${got}" = "${expected}" ]; then
+              echo "prod verified: built_at ${got} live (attempt ${attempt})"
+              exit 0
+            fi
+            echo "attempt ${attempt}: prod built_at = '${got:-unreachable}' — waiting for the Vercel deploy"
+            sleep 12
+          done
+          echo "::error::prod does not serve built_at ${expected} after ~6 min — Vercel deploy failed or very slow (check the Vercel dashboard + the commit author rule)"
           exit 1
 
       - name: Runner-repo state (public observability; best-effort)
@@ -220,9 +275,25 @@ jobs:
           print(f"state/last-run.json updated to {today}.")
           PYEOF
 
+      # ─── Failure log preservation (W2-c P2, 2026-09-29) ─────────────
+      # The ephemeral runner is the only place the refresh log exists
+      # (daily_refresh.sh redirects pipeline output to a gitignored
+      # file). Without this artifact a failed run tells you WHICH step
+      # failed but never WHY.
+      - name: Upload refresh logs (on failure)
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refresh-logs-${{ github.run_id }}
+          path: |
+            comfy-templates/work/comfy-templates/logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
       # ─── Failure alerting (AR3 D1) ────────────────────────────────
       # Runs AFTER every other step so any failure (checkout/PAT death,
-      # pipeline, audit, push exhaustion, timeout-kill) reaches it.
+      # pipeline, audit, consumption test, push exhaustion, prod-verify,
+      # timeout-kill) reaches it.
       - name: Alert on failure (open/comment alert issue)
         if: failure() || cancelled()
         env:
@@ -236,6 +307,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - << 'PYEOF'
+          import datetime
           import json
           import os
           import urllib.request
@@ -274,11 +346,11 @@ jobs:
               f"{marker}\n"
               f"**Scheduled data refresh FAILED** — production data is now "
               f"stale until this is fixed.\n\n"
-              f"- Run: {run_url}\n"
+              f"- Run: {run_url}  (logs attached as a run artifact)\n"
               f"- Event: `{os.environ['EVENT_NAME']}`  |  "
               f"Job status: `{os.environ['JOB_STATUS']}`  |  "
               f"Attempt: `{os.environ['RUN_ATTEMPT']}`\n"
-              f"- Time (UTC): {__import__('datetime').datetime.utcnow().isoformat()}\n\n"
+              f"- Time (UTC): {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n\n"
               f"Open the run URL and read the first red step (check the "
               f"checkout step first — a dead/rotted `GH_PAT` secret fails "
               f"there, exactly like the 2026-09-21 incident; fix = "
@@ -338,7 +410,9 @@ jobs:
               raise SystemExit(0)
 
           # Close ONLY bot-created alerts (marker in body) — never a
-          # human note that happened to carry the label.
+          # human note that happened to carry the label. If you reopen
+          # a bot alert to track it manually, REMOVE the label first or
+          # the next green run will close it again.
           closed = 0
           for issue in issues:
               if marker not in (issue.get("body") or ""):
