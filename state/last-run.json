@@ -1,6 +1,8 @@
 {
-  "date": "2026-09-29",
-  "built_at": "2026-09-29T01:12:08.607733+00:00",
+  "date": "2026-09-30",
+  "built_at": "2026-09-30T01:22:54.647559+00:00",
   "corpus_total": 940,
+  "gl_mirror": "success",
+  "blobs_snapshot": "success",
   "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the weekly workload)"
 }
