@@ -138,6 +138,7 @@ jobs:
           bunx vitest run tests/lib/public-data-consumption.test.ts --reporter=dot
 
       - name: Commit and push data changes (race-safe)
+        id: push
         working-directory: comfy-templates
         run: |
           set -euo pipefail
@@ -150,8 +151,10 @@ jobs:
           git add work/comfy-templates/data public/data
           if git diff --cached --quiet; then
             echo "No data changes — upstream static since the last run"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
           git commit -m "chore(data): weekly upstream refresh $(date -u +%Y-%m-%d)"
           # NOTE: checkout@v4 leaves the runner on a DETACHED HEAD, so a
           # bare `git push` fails — push the explicit refspec HEAD:main
@@ -202,10 +205,67 @@ jobs:
           echo "::error::prod does not serve built_at ${expected} after ~6 min — Vercel deploy failed or very slow (check the Vercel dashboard + the commit author rule)"
           exit 1
 
+      # ─── GitLab mirror (redundant data backup, W15) ───────────────
+      # GitHub is the primary disk; GitLab carries the second copy of
+      # every data commit. Runs whenever the data push succeeded — even
+      # if the prod-verify below reds (the commit still deserves its
+      # mirror). Self-healing: re-pushing an up-to-date main is a no-op,
+      # so this also catches up after any missed mirror. NEVER force
+      # push — if GL ever diverges (it only ever receives fast-forwards)
+      # the step reds loudly instead of overwriting. A red here pages
+      # the same alert path as a pipeline failure: the backup contract
+      # is part of the pipeline now (user directive 2026-09-30).
+      - name: Mirror to GitLab (redundant data backup)
+        id: glmirror
+        if: ${{ !cancelled() && steps.push.conclusion == 'success' }}
+        working-directory: comfy-templates
+        env:
+          GITLAB_PAT: ${{ secrets.GITLAB_PAT }}
+          GL_REPO: ansgareutychisO/comfy-templates
+        run: |
+          set -euo pipefail
+          if [ -z "${GITLAB_PAT}" ]; then
+            echo "::error::GITLAB_PAT secret not set — the GitLab mirror (redundant data backup) cannot run."
+            exit 1
+          fi
+          for attempt in 1 2 3 4 5; do
+            if git push "https://oauth2:${GITLAB_PAT}@gitlab.com/${GL_REPO}.git" HEAD:main; then
+              echo "GitLab mirror OK (attempt ${attempt})"
+              exit 0
+            fi
+            echo "mirror attempt ${attempt} failed — retrying in 20s"
+            sleep 20
+          done
+          echo "::error::GitLab mirror failed after 5 attempts — GitHub still has the data, but the redundant copy is stale: https://gitlab.com/${GL_REPO}"
+          exit 1
+
+      # ─── Netlify Blobs snapshot (tertiary data backup, W15) ────────
+      # Third copy of the DATA LAYER (dated tar.gz, not git history) on
+      # Netlify Blobs. Optional until the Netlify migration lands: skips
+      # silently when the secrets are absent; a failure is a WARNING, not
+      # a red run (promote to fatal when Blobs becomes load-bearing).
+      - name: Snapshot data to Netlify Blobs (tertiary backup)
+        id: blobs
+        if: ${{ !cancelled() && steps.push.conclusion == 'success' && steps.push.outputs.pushed == 'true' }}
+        working-directory: comfy-templates
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NETLIFY_AUTH_TOKEN}" ] || [ -z "${NETLIFY_SITE_ID}" ]; then
+            echo "Netlify secrets not set — skipping the blobs snapshot (optional tertiary backup)"
+            exit 0
+          fi
+          python3 work/comfy-templates/scripts/blobs_backup.py snapshot --keep 45 \
+            || echo "::warning::blobs snapshot failed (non-fatal — tertiary layer)"
+
       - name: Runner-repo state (public observability; best-effort)
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           RUNNER_REPO: comfy-backend/comfy-templates-runner
+          GL_MIRROR: ${{ steps.glmirror.outcome }}
+          BLOBS_SNAPSHOT: ${{ steps.blobs.outcome }}
         run: |
           set -euo pipefail
           today="$(date -u +%F)"
@@ -259,6 +319,8 @@ jobs:
               "date": today,
               "built_at": built_at,
               "corpus_total": corpus_total,
+              "gl_mirror": os.environ.get("GL_MIRROR", ""),
+              "blobs_snapshot": os.environ.get("BLOBS_SNAPSHOT", ""),
               "purpose": "public observability: last successful data-refresh run "
                          "(keeps GHA schedules alive + shows liveness of the weekly workload)",
           }
