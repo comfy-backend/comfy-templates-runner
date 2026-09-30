@@ -229,9 +229,13 @@ jobs:
             exit 1
           fi
           for attempt in 1 2 3 4 5; do
-            if git push "https://oauth2:${GITLAB_PAT}@gitlab.com/${GL_REPO}.git" HEAD:main; then
+            if git push "https://oauth2:${GITLAB_PAT}@gitlab.com/${GL_REPO}.git" HEAD:main 2>&1 | tee /tmp/glmirror.err; then
               echo "GitLab mirror OK (attempt ${attempt})"
               exit 0
+            fi
+            if grep -q "HTTP Basic: Access denied\|401" /tmp/glmirror.err 2>/dev/null; then
+              echo "::error::GitLab mirror got 401 — GITLAB_PAT is dead/rotted (deterministic; not retrying). Fix: set-secret.py on BOTH runner repos."
+              exit 1
             fi
             echo "mirror attempt ${attempt} failed — retrying in 20s"
             sleep 20
@@ -251,16 +255,17 @@ jobs:
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        continue-on-error: true   # warning-class, but the state must see a REAL failure (F3)
         run: |
           set -euo pipefail
           if [ -z "${NETLIFY_AUTH_TOKEN}" ] || [ -z "${NETLIFY_SITE_ID}" ]; then
             echo "Netlify secrets not set — skipping the blobs snapshot (optional tertiary backup)"
             exit 0
           fi
-          python3 work/comfy-templates/scripts/blobs_backup.py snapshot --keep 45 \
-            || echo "::warning::blobs snapshot failed (non-fatal — tertiary layer)"
+          python3 work/comfy-templates/scripts/blobs_backup.py snapshot --keep 45
 
       - name: Runner-repo state (public observability; best-effort)
+        if: ${{ !cancelled() }}   # F2: must record gl_mirror/blobs outcomes even on red runs
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           RUNNER_REPO: comfy-backend/comfy-templates-runner
