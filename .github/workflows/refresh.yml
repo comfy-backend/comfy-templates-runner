@@ -233,7 +233,7 @@ jobs:
               echo "GitLab mirror OK (attempt ${attempt})"
               exit 0
             fi
-            if grep -q "HTTP Basic: Access denied\|401" /tmp/glmirror.err 2>/dev/null; then
+            if grep -qE "HTTP Basic: Access denied|Authentication failed|401" /tmp/glmirror.err 2>/dev/null; then
               echo "::error::GitLab mirror got 401 — GITLAB_PAT is dead/rotted (deterministic; not retrying). Fix: set-secret.py on BOTH runner repos."
               exit 1
             fi
