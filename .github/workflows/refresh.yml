@@ -260,8 +260,10 @@ jobs:
           set -euo pipefail
           if [ -z "${NETLIFY_AUTH_TOKEN}" ] || [ -z "${NETLIFY_SITE_ID}" ]; then
             echo "Netlify secrets not set — skipping the blobs snapshot (optional tertiary backup)"
+            echo "result=skipped_no_secrets" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "result=attempted" >> "$GITHUB_OUTPUT"
           python3 work/comfy-templates/scripts/blobs_backup.py snapshot --keep 45
 
       - name: Runner-repo state (public observability; best-effort)
@@ -270,7 +272,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           RUNNER_REPO: comfy-backend/comfy-templates-runner
           GL_MIRROR: ${{ steps.glmirror.outcome }}
-          BLOBS_SNAPSHOT: ${{ steps.blobs.outcome }}
+          BLOBS_SNAPSHOT: ${{ steps.blobs.outputs.result || steps.blobs.outcome }}
         run: |
           set -euo pipefail
           today="$(date -u +%F)"
