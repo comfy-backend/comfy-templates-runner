@@ -73,7 +73,12 @@ on:
   schedule:
     - cron: "0 16 * * 1" # Monday 16:00 UTC (09:00 PDT / 08:00 PST)
     - cron: "7 17 * * 2" # Tuesday backstop (17:07 UTC, off-peak)
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_blobs:
+        description: "Run the Netlify Blobs snapshot even without a data push (validation lane)"
+        type: boolean
+        default: false
 
 concurrency:
   group: weekly-refresh
@@ -250,7 +255,7 @@ jobs:
       # a red run (promote to fatal when Blobs becomes load-bearing).
       - name: Snapshot data to Netlify Blobs (tertiary backup)
         id: blobs
-        if: ${{ !cancelled() && steps.push.conclusion == 'success' && steps.push.outputs.pushed == 'true' }}
+        if: ${{ !cancelled() && steps.push.conclusion == 'success' && (steps.push.outputs.pushed == 'true' || inputs.force_blobs == true) }}
         working-directory: comfy-templates
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
