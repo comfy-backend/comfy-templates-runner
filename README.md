@@ -45,7 +45,7 @@ and self-heal-dispatches this workflow if everything goes quiet.
   secrets. Only org admins can push here.
 - Every private-repo access authenticates with the `GH_PAT` secret;
   this repo's own default `GITHUB_TOKEN` cannot read or write anything
-  private (workflows declare `permissions: {}`).
+- Workflows declare minimal permissions (`issues: write` for the alert steps only — AR3 D1; the default `GITHUB_TOKEN` cannot read or write the private repo's data).
 - The data commit is scoped strictly to pipeline outputs — never
   `git add -A` — and the push is plain (never force; rebase-retry ×3).
 - Failure gating: a pipeline step failure withholds the stamp, so the
