@@ -322,7 +322,7 @@ jobs:
                   raw = resp.read()
                   return resp.status, (json.loads(raw) if raw else {})
 
-          sha, existing_date, existing_blobs = "", "", ""
+          sha, existing_date, existing_blobs, existing_gl = "", "", "", ""
           try:
               _, d = call("GET")
               sha = d.get("sha", "")
@@ -330,25 +330,34 @@ jobs:
               existing = json.loads(content)
               existing_date = existing.get("date", "")
               existing_blobs = existing.get("blobs_snapshot", "")
+              existing_gl = existing.get("gl_mirror", "")
           except Exception:
               pass  # 404 on first run — create mode
 
-          # W18-r1 P2: first-writer-of-the-day-wins, EXCEPT an unhealthy
-          # blobs record — a later same-day run with a real, DIFFERENT
-          # blobs outcome may overwrite it, or the watchdog reds 2-3x on
-          # a single transient failure (and re-heals redundantly). An
-          # empty outcome (blobs step skipped on a red pipeline) must
-          # NOT mask a recorded failure.
+          # W18-r1 P2 + W18-r3 P3-1: first-writer-of-the-day-wins,
+          # EXCEPT an unhealthy record — a later same-day run with a real,
+          # DIFFERENT outcome may overwrite it, or the watchdog reds 2-3x
+          # on a single transient failure. Skip-class values ('skipped'/
+          # 'skipped_no_push'/'' — a skipped step) are NOT outcomes and
+          # must never mask a recorded failure. Also heals a failed
+          # gl_mirror record (W18-b GAP 5b).
           new_blobs = os.environ.get("BLOBS_SNAPSHOT", "")
-          heals_unhealthy = (existing_blobs in ("failed", "skipped_no_secrets")
-                             and new_blobs and new_blobs != existing_blobs)
-          if existing_date == today and not heals_unhealthy:
+          new_gl = os.environ.get("GL_MIRROR", "")
+          NOT_AN_OUTCOME = ("", "skipped", "skipped_no_push", "cancelled", "not_run")
+          heals = (
+              (existing_blobs in ("failed", "skipped_no_secrets")
+               and new_blobs not in NOT_AN_OUTCOME and new_blobs != existing_blobs)
+              or (existing_gl == "failure"
+                  and new_gl not in NOT_AN_OUTCOME and new_gl != "failure")
+          )
+          if existing_date == today and not heals:
               print(f"state/last-run.json already records {today} — skipping.")
               raise SystemExit(0)
           if existing_date == today:
-              print(f"state/last-run.json records {today} with unhealthy "
-                    f"blobs_snapshot={existing_blobs!r} — overwriting with "
-                    f"this run's outcome ({new_blobs!r}).")
+              print(f"state/last-run.json records {today} with an unhealthy "
+                    f"record (blobs={existing_blobs!r}, gl={existing_gl!r}) — "
+                    f"overwriting with this run's outcomes "
+                    f"(blobs={new_blobs!r}, gl={new_gl!r}).")
 
           # Enriched payload (AR3 D1): prod-facing built_at + corpus size
           # so freshness is observable from the state file alone.
@@ -478,6 +487,93 @@ jobs:
                    f"/repos/{repo}/issues/{open_alerts[0]['number']}/comments",
                    json.dumps({"body": body_text}).encode())
               print(f"alert issue #{open_alerts[0]['number']} COMMENTED")
+          PYEOF
+
+      - name: Watchdog-of-the-watchdog (standby heartbeat probe)
+        # W18-b GAP 1: nothing probes the prober — if the standby watchdog
+        # dies, every failure it would catch goes unnoticed. This step (and
+        # the Netlify lane's section 10) checks the standby's PUBLIC
+        # state/watchdog.json heartbeat. DEDICATED label so green refresh
+        # runs do NOT auto-close it — only a freshly observed heartbeat
+        # closes it. Runs on green runs only (a red run already pages).
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_REPO: comfy-backend/comfy-templates-runner
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF' || echo "::warning::watchdog-stale probe failed (non-fatal)"
+          import datetime
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["RUNNER_REPO"]
+          label, marker = "watchdog-stale-alert", "<!-- bot: watchdog-stale-alert -->"
+          state_url = ("https://raw.githubusercontent.com/comfyui-catalog/"
+                       "comfy-templates-standby/main/state/watchdog.json")
+
+          def call(method, path, body=None):
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}", method=method, data=body,
+                  headers={"Authorization": f"token {token}",
+                           "User-Agent": "comfy-templates-runner",
+                           "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  raw = resp.read()
+                  return resp.status, (json.loads(raw) if raw else {})
+
+          wd_date, age_days = "", None
+          try:
+              with urllib.request.urlopen(state_url, timeout=30) as resp:
+                  wd_date = json.load(resp).get("date", "")
+              age_days = (datetime.datetime.now(datetime.timezone.utc).date()
+                          - datetime.date.fromisoformat(wd_date)).days
+          except Exception as e:
+              print(f"watchdog.json unreachable ({e}) — treating as STALE (loud)")
+              age_days = 999
+
+          try:
+              _, issues = call("GET", f"/repos/{repo}/issues?labels={label}&state=open")
+          except Exception:
+              issues = []
+          open_alerts = [i for i in issues if marker in (i.get("body") or "")]
+
+          if age_days is not None and age_days > 2:
+              body_text = (
+                  f"{marker}\n**STANDBY WATCHDOG HEARTBEAT STALE** — the "
+                  f"outer safety net (daily freshness probes + self-heal "
+                  f"dispatch) appears DEAD: state/watchdog.json last "
+                  f"heartbeat = {wd_date or 'unreachable'} ({age_days}d "
+                  f"old). Every failure it would catch is currently "
+                  f"unguarded. Check the standby repo's watchdog workflow "
+                  f"state + its schedules.\n\n"
+                  f"- Observed by the GHA backup lane\n"
+                  f"- Time (UTC): "
+                  f"{datetime.datetime.now(datetime.timezone.utc).isoformat()}\n\n"
+                  f"cc @trinitylivy")
+              if not open_alerts:
+                  call("POST", f"/repos/{repo}/issues", json.dumps(
+                      {"title": "Standby watchdog heartbeat STALE — action required",
+                       "body": body_text, "labels": [label]}).encode())
+                  print("watchdog-stale alert issue CREATED")
+              else:
+                  call("POST",
+                       f"/repos/{repo}/issues/{open_alerts[0]['number']}/comments",
+                       json.dumps({"body": body_text}).encode())
+                  print(f"watchdog-stale alert #{open_alerts[0]['number']} COMMENTED")
+          else:
+              for issue in open_alerts:
+                  call("POST",
+                       f"/repos/{repo}/issues/{issue['number']}/comments",
+                       json.dumps({"body": f"Recovered: standby watchdog "
+                                           f"heartbeat fresh again ({wd_date}) "
+                                           f"— closing."}).encode())
+                  call("PATCH", f"/repos/{repo}/issues/{issue['number']}",
+                       json.dumps({"state": "closed"}).encode())
+              print(f"standby watchdog fresh ({wd_date}, {age_days}d) — "
+                    f"closed {len(open_alerts)} stale-alert issue(s)")
           PYEOF
 
       - name: Resolve alert on success (auto-close bot alerts)
