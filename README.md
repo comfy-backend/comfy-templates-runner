@@ -16,14 +16,21 @@ this org's runners are healthy.)
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `refresh.yml` | Monday 16:00 UTC + Tuesday 17:07 UTC backstop / dispatch | The weekly upstream data refresh: checks out the private repo via the `GH_PAT` secret, runs the 8-step pipeline (`01–07 + verify`, 100% Python stdlib — no install step), runs the 7-check audit, then race-safely commits the refreshed data (`work/comfy-templates/data` + `public/data`) back to the private repo's `main` as `trinitylivy` — which the connected Vercel project auto-deploys. Keeps `state/last-run.json` fresh (public observability + resets GHA's 60-day schedule-inactivity timer). |
+| `refresh.yml` | Wednesday 16:00 UTC + Thursday 17:07 UTC backstop / dispatch (`force_blobs` input) | The WEEKLY BACKUP lane of the data refresh (the PRIMARY lane is the Netlify daily scrape on comfy-backend/comfy-scraper, live 2026-10-09): checks out the private repo via the `GH_PAT` secret, runs the 8-step pipeline (`01–07 + verify`, 100% Python stdlib — no install step), runs the 10-check audit (A–J), then race-safely commits the refreshed data (`work/comfy-templates/data` + `public/data`) back to the private repo's `main` as `trinitylivy` — which the connected Vercel project auto-deploys. Also mirrors to GitLab (fatal) + snapshots to Netlify Blobs (warning-class). Keeps `state/last-run.json` fresh (public observability + resets GHA's 60-day schedule-inactivity timer). |
 
-## Why the odd cadence (Mon + Tue backstop)
+## Why the Wed + Thu cadence (W18, 2026-10-09)
 
-GitHub's scheduler DROPS a large fraction of scheduled runs under
-platform load (observed 2026-09-06 on the sibling hourly runner: ~2/3
-dropped). The Tuesday backstop self-heals a dropped Monday; when Monday
-already landed, Tuesday finds "no data changes" and exits clean.
+The Netlify lane (comfy-backend/comfy-scraper) now fires DAILY at
+04:00 UTC — it is the primary. This GHA workflow is the weekly backup
+lane, moved off Monday so it never races the daily fires. GitHub's
+scheduler DROPS a large fraction of scheduled runs under platform load
+(observed 2026-09-06 on the sibling hourly runner: ~2/3 dropped), so
+the Thursday backstop self-heals a dropped Wednesday. NOTE: a green
+backup-lane run does NOT "find no data changes and exit clean" — every
+run re-stamps `stats.json` `built_at`, so each green run commits a
+small churn commit. That churn is the DESIGNED liveness heartbeat; do
+not "fix" it. The standby watchdog (daily 04:30 + 16:30 UTC) alerts
+and self-heal-dispatches this workflow if everything goes quiet.
 
 ## Safety properties
 
@@ -63,8 +70,31 @@ already landed, Tuesday finds "no data changes" and exits clean.
 
 The private repo carries its own dormant copy
 (`.github/workflows/weekly-refresh.yml`) for the day the account-level
-block lifts — then both run the same canonical Monday slot; the
-concurrency groups live in different repos, so the practical guard
-against double-refresh is the "no data changes" early exit (the refresh
-is deterministic; the second run finds nothing to commit). The sandbox
-daemon remains a Thursday-09:00-PT local fallback that never commits.
+block lifts. The practical guard against double-refresh across lanes
+is the race-safe push (rebase + retry) — every green run re-stamps
+`built_at`, so same-day runs land as small churn commits, newest wins.
+
+## Rollback (last-good corpus)
+
+If a bad corpus lands on prod (a gate regression, a bad pin, upstream
+poison), roll the data back — the corpus is pure data commits:
+
+```bash
+# 1. find the last good data commit (before the bad one)
+git log --oneline -- public/data | head -5
+# 2. revert ONLY the data paths (never the whole tree — app code may have
+#    moved on since)
+git revert --no-commit <bad-sha> && git restore --staged --worktree -- :^public/data ^work/comfy-templates/data && git checkout HEAD -- . ':!public/data' ':!work/comfy-templates/data' 2>/dev/null || true
+git commit -m "revert(data): roll back to the last good corpus (<reason>)"
+git push origin main   # Vercel auto-deploys the rollback
+# 3. while you fix the gate: freeze the Netlify daily fire (delete the
+#    build hook on the scraper site, or set the fn schedule far out) and
+#    disable the Wednesday cron here — or fix-forward and let the next
+#    run re-land fresh data
+curl -X PUT -H "Authorization: token $PAT" \
+  https://api.github.com/repos/comfy-backend/comfy-templates-runner/actions/workflows/refresh.yml/disable
+```
+
+The simplest reliable variant: `git revert <bad-data-commit>` (data
+commits touch only public/data + work/comfy-templates/data, so a plain
+revert is safe) → push → re-enable after the fix.
