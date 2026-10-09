@@ -52,9 +52,9 @@ name: Weekly Data Refresh
 # DESIGNED liveness heartbeat: it proves the pipeline (and the
 # watchdog's built_at freshness signal) is alive even when upstream is
 # static. Do NOT "fix" it by skipping the stamp.
-# The daily watchdog (comfyui-catalog standby, 04:30 UTC + Thu 16:23)
-# is the outer safety net: it alerts AND self-heal-dispatches this
-# workflow when everything above goes quiet.
+# The daily watchdog (comfyui-catalog standby, 04:30 + 16:30 UTC +
+# Thu 16:23) is the outer safety net: it alerts AND self-heal-dispatches
+# the PRIMARY runner's refresh.yml when everything above goes quiet.
 #
 # ─── Failure alerting (2026-09-27, AR3 D1) ───────────────────
 # The 2026-09-21/22 PAT-death failures sat unnoticed for ~5 days:
@@ -201,8 +201,8 @@ jobs:
       # deploy can fail silently (incl. the commit-author trap). Poll
       # prod's stats.json until its built_at matches the tree we just
       # pushed; a mismatch after ~6 minutes reds this run (the alert
-      # step then fires the same day instead of the watchdog's 8-day
-      # worst case).
+      # step then fires the same day instead of the watchdog's ~26-48h
+      # worst case, W18 daily cadence).
       - name: Verify production deployment (post-push)
         working-directory: comfy-templates
         run: |
@@ -280,8 +280,15 @@ jobs:
             echo "result=skipped_no_secrets" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "result=attempted" >> "$GITHUB_OUTPUT"
-          python3 work/comfy-templates/scripts/blobs_backup.py snapshot --keep 45
+          # W18-r1 P1: emit TERMINAL values in scrape.sh's vocabulary —
+          # the watchdog's blobs probe reds on "failed"; "attempted" was
+          # indistinguishable between success and failure (dead probe).
+          if python3 work/comfy-templates/scripts/blobs_backup.py snapshot --keep 45; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            exit 1   # continue-on-error keeps the run green; outcome records the real failure
+          fi
 
       - name: Runner-repo state (public observability; best-effort)
         if: ${{ !cancelled() }}   # F2: must record gl_mirror/blobs outcomes even on red runs
@@ -315,18 +322,33 @@ jobs:
                   raw = resp.read()
                   return resp.status, (json.loads(raw) if raw else {})
 
-          sha, existing_date = "", ""
+          sha, existing_date, existing_blobs = "", "", ""
           try:
               _, d = call("GET")
               sha = d.get("sha", "")
               content = base64.b64decode(d.get("content", "")).decode()
-              existing_date = json.loads(content).get("date", "")
+              existing = json.loads(content)
+              existing_date = existing.get("date", "")
+              existing_blobs = existing.get("blobs_snapshot", "")
           except Exception:
               pass  # 404 on first run — create mode
 
-          if existing_date == today:
+          # W18-r1 P2: first-writer-of-the-day-wins, EXCEPT an unhealthy
+          # blobs record — a later same-day run with a real, DIFFERENT
+          # blobs outcome may overwrite it, or the watchdog reds 2-3x on
+          # a single transient failure (and re-heals redundantly). An
+          # empty outcome (blobs step skipped on a red pipeline) must
+          # NOT mask a recorded failure.
+          new_blobs = os.environ.get("BLOBS_SNAPSHOT", "")
+          heals_unhealthy = (existing_blobs in ("failed", "skipped_no_secrets")
+                             and new_blobs and new_blobs != existing_blobs)
+          if existing_date == today and not heals_unhealthy:
               print(f"state/last-run.json already records {today} — skipping.")
               raise SystemExit(0)
+          if existing_date == today:
+              print(f"state/last-run.json records {today} with unhealthy "
+                    f"blobs_snapshot={existing_blobs!r} — overwriting with "
+                    f"this run's outcome ({new_blobs!r}).")
 
           # Enriched payload (AR3 D1): prod-facing built_at + corpus size
           # so freshness is observable from the state file alone.
