@@ -33,20 +33,28 @@ name: Weekly Data Refresh
 #   * push is plain (never force); on a mid-run race it rebases and
 #     retries 3 times, then fails loudly.
 #
-# ─── Cadence design ──────────────────────────────────────────
-# GitHub's scheduler DROPS a large fraction of scheduled runs under
-# platform load (observed 2026-09-06 on the hourly sync-runner: ~2/3).
-# Two mechanisms guarantee weekly coverage:
-#   1. The canonical Monday 16:00 UTC slot (09:00 PDT).
-#   2. A Tuesday 17:07 UTC backstop (off-peak :07 convention).
-# NOTE (W2-c 2026-09-29, corrected): the Tuesday run does NOT "exit
+# ─── Cadence design (W18, 2026-10-09) ────────────────────────
+# The PRIMARY lane is now the Netlify daily 04:00 UTC scrape
+# (comfy-backend/comfy-scraper — deployed + E2E-green 2026-10-09;
+# see DESIGN_W15_BACKUP_NETLIFY.md). This GHA workflow is the WEEKLY
+# BACKUP lane per the user directive: it proves the GHA path weekly
+# and catches Netlify outages. GitHub's scheduler DROPS a large
+# fraction of scheduled runs under platform load (observed 2026-09-06
+# on the hourly sync-runner: ~2/3), so two mechanisms keep weekly
+# coverage:
+#   1. The canonical Wednesday 16:00 UTC slot (09:00 PDT) — moved
+#      from Monday in W18 so the GHA lane never races the daily
+#      Netlify fires.
+#   2. A Thursday 17:07 UTC backstop (off-peak :07 convention).
+# NOTE (W2-c 2026-09-29, corrected): the backstop run does NOT "exit
 # clean with no changes" — every build re-stamps stats.json built_at,
 # so each green run commits a small churn commit. That churn is the
 # DESIGNED liveness heartbeat: it proves the pipeline (and the
 # watchdog's built_at freshness signal) is alive even when upstream is
 # static. Do NOT "fix" it by skipping the stamp.
-# The sandbox's Thursday-09:00-PT daemon stays as the local fallback
-# (it never commits; git is the disk).
+# The daily watchdog (comfyui-catalog standby, 04:30 UTC + Thu 16:23)
+# is the outer safety net: it alerts AND self-heal-dispatches this
+# workflow when everything above goes quiet.
 #
 # ─── Failure alerting (2026-09-27, AR3 D1) ───────────────────
 # The 2026-09-21/22 PAT-death failures sat unnoticed for ~5 days:
@@ -71,8 +79,12 @@ name: Weekly Data Refresh
 
 on:
   schedule:
-    - cron: "0 16 * * 1" # Monday 16:00 UTC (09:00 PDT / 08:00 PST)
-    - cron: "7 17 * * 2" # Tuesday backstop (17:07 UTC, off-peak)
+    # W18 (2026-10-09): moved from Mon/Tue to Wed/Thu — the Netlify
+    # daily lane (04:00 UTC) is now primary; Wednesday keeps the GHA
+    # backup lane visible weekly WITHOUT racing the daily fires, and
+    # Thursday 17:07 remains its scheduler-drop backstop.
+    - cron: "0 16 * * 3" # Wednesday 16:00 UTC (09:00 PDT / 08:00 PST)
+    - cron: "7 17 * * 4" # Thursday backstop (17:07 UTC, off-peak)
   workflow_dispatch:
     inputs:
       force_blobs:
