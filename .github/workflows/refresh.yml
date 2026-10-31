@@ -349,14 +349,26 @@ jobs:
           # 'skipped_no_push'/'' — a skipped step) are NOT outcomes and
           # must never mask a recorded failure. Also heals a failed
           # gl_mirror record (W18-b GAP 5b).
+          # W89b (2026-10-31, R2 review fix): a same-day PLACEHOLDER
+          # record (skip-class: '', 'not_run', 'skipped*', 'cancelled') is
+          # not an observation either — a later same-day run with a REAL
+          # outcome ('success'/'failure') always overwrites it. Before
+          # this, a run that died pre-GL recorded gl_mirror='not_run' and
+          # the NEXT run's genuine GL 'failure' could not replace it
+          # (observed live 2026-10-31) — the watchdog's GL probe stayed
+          # green all day over a real outage.
           new_blobs = os.environ.get("BLOBS_SNAPSHOT", "")
           new_gl = os.environ.get("GL_MIRROR", "")
           NOT_AN_OUTCOME = ("", "skipped", "skipped_no_push", "cancelled", "not_run")
           heals = (
               (existing_blobs in ("failed", "skipped_no_secrets")
                and new_blobs not in NOT_AN_OUTCOME and new_blobs != existing_blobs)
+              or (existing_blobs in NOT_AN_OUTCOME
+                  and new_blobs not in NOT_AN_OUTCOME)
               or (existing_gl == "failure"
                   and new_gl not in NOT_AN_OUTCOME and new_gl != "failure")
+              or (existing_gl in NOT_AN_OUTCOME
+                  and new_gl not in NOT_AN_OUTCOME)
           )
           if existing_date == today and not heals:
               print(f"state/last-run.json already records {today} — skipping.")
