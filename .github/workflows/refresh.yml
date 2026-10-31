@@ -229,12 +229,20 @@ jobs:
       # mirror). Self-healing: re-pushing an up-to-date main is a no-op,
       # so this also catches up after any missed mirror. NEVER force
       # push — if GL ever diverges (it only ever receives fast-forwards)
-      # the step reds loudly instead of overwriting. A red here pages
-      # the same alert path as a pipeline failure: the backup contract
-      # is part of the pipeline now (user directive 2026-09-30).
+      # the step reds loudly instead of overwriting.
+      # W89 (2026-10-31): demoted to WARNING-CLASS (continue-on-error).
+      # The 2026-10-21+ incident: the GL PAT was revoked → this step
+      # reded every run for 9 days while the data itself kept landing
+      # (Oct 22-29) — a redundant-backup outage must never red the data
+      # lane again (same W18 amendment the blobs lane got). The
+      # ::error:: annotation still pages the dashboard; the state step
+      # still records gl_mirror=failure via steps.glmirror.outcome; the
+      # standby watchdog's probe-3b still tracks GL parity. The run
+      # stays green exactly when the data is fresh.
       - name: Mirror to GitLab (redundant data backup)
         id: glmirror
         if: ${{ !cancelled() && steps.push.conclusion == 'success' }}
+        continue-on-error: true   # W89: warning-class; outcome records the real failure
         working-directory: comfy-templates
         env:
           GITLAB_PAT: ${{ secrets.GITLAB_PAT }}
