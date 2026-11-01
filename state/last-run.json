@@ -1,9 +1,9 @@
 {
-  "date": "2026-10-31",
-  "built_at": "2026-10-31T04:01:48.051386+00:00",
-  "corpus_total": 1192,
-  "gl_mirror": "not_run",
-  "blobs_snapshot": "skipped_no_push",
+  "date": "2026-11-01",
+  "built_at": "2026-11-01T04:01:47.834835+00:00",
+  "corpus_total": 1028,
+  "gl_mirror": "failure",
+  "blobs_snapshot": "success",
   "source": "netlify",
   "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the workload)"
 }
