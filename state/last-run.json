@@ -1,9 +1,8 @@
 {
-  "date": "2026-11-23",
-  "built_at": "2026-11-23T04:03:51.081785+00:00",
-  "corpus_total": 1074,
-  "gl_mirror": "not_run",
-  "blobs_snapshot": "skipped_no_push",
-  "source": "netlify",
-  "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the workload)"
+  "date": "2026-11-24",
+  "built_at": "2026-11-24T03:04:09.019120+00:00",
+  "corpus_total": 1078,
+  "gl_mirror": "skipped",
+  "blobs_snapshot": "skipped",
+  "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the weekly workload)"
 }
