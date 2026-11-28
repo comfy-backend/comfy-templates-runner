@@ -1,7 +1,7 @@
 {
-  "date": "2026-11-27",
-  "built_at": "2026-11-27T00:43:53.572736+00:00",
-  "corpus_total": 1078,
+  "date": "2026-11-28",
+  "built_at": "2026-11-28T00:13:40.078557+00:00",
+  "corpus_total": 1086,
   "gl_mirror": "skipped",
   "blobs_snapshot": "skipped",
   "purpose": "public observability: last successful data-refresh run (keeps GHA schedules alive + shows liveness of the weekly workload)"
